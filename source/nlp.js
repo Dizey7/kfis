@@ -308,5 +308,68 @@
     return out;
   }
 
-  return { parseLine, parseText, extractAmount, extractDate, norm };
+  /* ------------------------- Lecture de reçus ------------------------- */
+  const MONEY_RE = /(-?\d{1,3}(?:[  ]?\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)/g;
+  function moneyOnLine(line) {
+    const out = []; let m; MONEY_RE.lastIndex = 0;
+    while ((m = MONEY_RE.exec(line))) out.push(K.parseMoney(m[1].replace(/[  ]/g, '') + ',' + m[2]));
+    return out.filter(v => v !== null);
+  }
+  const KNOWN_MERCHANTS = ['IGA', 'METRO', 'MAXI', 'PROVIGO', 'SUPER C', 'COSTCO', 'WALMART', 'ADONIS', 'JEAN COUTU', 'PHARMAPRIX', 'FAMILIPRIX', 'UNIPRIX', 'PROXIM', 'TIM HORTONS', 'STARBUCKS', 'MCDONALD', 'A&W', 'SUBWAY', 'ST-HUBERT', 'PETRO-CANADA', 'PETRO CANADA', 'SHELL', 'ESSO', 'ULTRAMAR', 'COUCHE-TARD', 'CANADIAN TIRE', 'HOME DEPOT', 'RONA', 'DOLLARAMA', 'WINNERS', 'SIMONS', 'SAQ', 'SAAQ', 'AMAZON', 'IKEA', 'BEST BUY', 'SEPHORA', 'UBER', 'STM', 'HYDRO-QUEBEC', 'VIDEOTRON', 'BELL'];
+  /**
+   * Texte d'un reçu (OCR) -> { merchant, totalCents, tpsCents, tvqCents, date, method, categoryId, warnings }
+   */
+  function parseReceipt(text, ctx) {
+    // Corrige les confusions classiques de lecture : « e,22 » -> « 0,22 », « 1O,50 » -> « 10,50 », « 4 , 99 » -> « 4,99 »
+    const fix = l => l.replace(/(^|[\s$])[oOeDQ]([.,]\d{2})(?!\d)/g, '$10$2').replace(/(\d)[oO](?=\d|[.,]\d)/g, '$10').replace(/(\d)[lI|](?=\d|[.,]\d)/g, '$11').replace(/(\d)\s+([.,])\s*(\d{2})(?!\d)/g, '$1$2$3');
+    const lines = String(text || '').split(/\r?\n/).map(l => fix(l.replace(/\s+/g, ' ').trim())).filter(Boolean);
+    const N_ = lines.map(norm);
+    const warnings = [];
+    // Total : ligne « TOTAL » (pas sous-total), sinon « montant / à payer », sinon le plus grand montant
+    let total = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const n = N_[i];
+      if (/\b(sous[- ]?total|subtotal|s\/total|total partiel|economies?|rabais|epargne|savings)\b/.test(n)) continue;
+      if (/\b(total|montant du|montant total|a payer|grand total|net a payer|amount due|balance due)\b/.test(n)) {
+        const v = moneyOnLine(lines[i]).concat(moneyOnLine(lines[i + 1] || '').slice(0, /\d[.,]\d{2}/.test(lines[i]) ? 0 : 1));
+        if (v.length) { total = Math.max(...v.filter(x => x > 0)); if (total > 0) break; total = null; }
+      }
+    }
+    const all = lines.flatMap(moneyOnLine).filter(v => v > 0);
+    if (total === null && all.length) { total = Math.max(...all); warnings.push('Total deviné (montant le plus élevé)'); }
+    const taxOn = re => { for (let i = 0; i < lines.length; i++) if (re.test(N_[i])) { const v = moneyOnLine(lines[i]).filter(x => x > 0); if (v.length) return v[v.length - 1]; } return null; };
+    const tps = taxOn(/\b(tps|gst|t\.p\.s|federal|fed\b)/), tvq = taxOn(/\b(tvq|qst|pst|t\.v\.q|provincial)\b/);
+    let sub = null;
+    for (let i = 0; i < lines.length; i++) if (/\b(sous[- ]?total|subtotal|s\/total)\b/.test(N_[i])) { const v = moneyOnLine(lines[i]).filter(x => x > 0); if (v.length) sub = v[v.length - 1]; }
+    if (total && sub && tps !== null && tvq !== null && sub + tps + tvq !== total && Math.abs(sub + tps + tvq - total) > 2) warnings.push('Total à vérifier : sous-total + taxes ≠ total');
+    // Date
+    let date = null; const joined = lines.join(' ');
+    let m = joined.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+    if (m) date = m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0');
+    if (!date && (m = joined.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2}|\d{2})\b/))) {
+      const y = m[3].length === 2 ? '20' + m[3] : m[3];
+      let d = +m[1], mo = +m[2]; if (mo > 12 && d <= 12) { const t = d; d = mo; mo = t; }
+      date = y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    }
+    if (!date) { const dd = extractDate(joined.replace(/\b\d{1,2}:\d{2}\b/g, ''), ctx.today); if (!dd.defaulted) date = dd.date; }
+    if (date && (!K.isISODate(date) || date > ctx.today || date < K.addDays(ctx.today, -400))) date = null;
+    if (!date) { date = ctx.today; warnings.push('Date du reçu non trouvée : aujourd’hui'); }
+    // Commerçant
+    const upper = joined.toUpperCase();
+    let merchant = KNOWN_MERCHANTS.find(k => upper.includes(k)) || null;
+    if (merchant) merchant = merchant.split(/([ -])/).map(w => w.length > 3 ? w[0] + w.slice(1).toLowerCase() : w).join('');
+    if (!merchant) {
+      const cand = lines.slice(0, 6).find(l => /[a-zà-ü]{3,}/i.test(l) && !/\d{3}[- ]?\d{3}[- ]?\d{4}/.test(l) && !/\b(rue|boul|avenue|av\.|ch\.|chemin|qc|quebec|montreal|laval|tel|www|http|bienvenue|welcome|facture|recu|receipt|caisse|transaction)\b/i.test(norm(l)) && !/^\d/.test(l));
+      merchant = cand ? cand.replace(/[^\p{L}\p{N}&'’ .-]/gu, '').trim().slice(0, 40) : null;
+    }
+    if (!merchant) warnings.push('Commerçant non reconnu');
+    const n = norm(joined);
+    const cat = matchCategory(norm((merchant || '') + ' ' + joined), (merchant || '') + ' ' + joined, ctx.cats);
+    if (!cat.sure) warnings.push('Catégorie à vérifier');
+    const method = /\b(visa|mastercard|master card|amex|american express|credit)\b/.test(n) ? 'Carte de crédit' : /\b(interac|debit)\b/.test(n) ? 'Débit' : /\b(comptant|cash|argent)\b/.test(n) ? 'Comptant' : '';
+    if (!total) warnings.push('Total non trouvé');
+    return { merchant, totalCents: total, subtotalCents: sub, tpsCents: tps, tvqCents: tvq, date, method, categoryId: cat.id, warnings };
+  }
+
+  return { parseLine, parseText, extractAmount, extractDate, norm, parseReceipt, matchCategory };
 });

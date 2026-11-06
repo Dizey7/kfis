@@ -215,6 +215,15 @@ details.more[open] summary{margin-bottom:12px}
 .smart-item{border-top:1px solid var(--line-2);align-items:flex-start}
 .smart-item.bad .t{color:var(--ink-3)}
 .smart-list .chips .pill{font-weight:500}
+.smart-cam{padding:8px 11px}
+.smart-cam span{display:inline}
+@media (max-width:640px){.smart-cam span{display:none}}
+.receipt-box{display:flex;gap:12px;align-items:flex-start;background:var(--surface-2);border:1px solid var(--line-2);border-radius:12px;padding:10px}
+.receipt-box img{width:64px;height:84px;object-fit:cover;border-radius:8px;border:1px solid var(--line);flex:none}
+.receipt-box svg{width:16px;height:16px;stroke:currentColor}
+.receipt-wait{display:grid;justify-items:center;gap:10px;padding:26px 8px;text-align:center}
+.spinner{width:34px;height:34px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .kbd{font-family:var(--f-mono);font-size:11px;border:1px solid var(--line);border-radius:5px;padding:1px 5px}
 .toast-undo{background:transparent;border:0;color:inherit;font-weight:700;text-decoration:underline;cursor:pointer;margin-left:10px;padding:0}
 @media (max-width:640px){.smart-in{font-size:16px}.smart-row .btn{min-height:40px}}

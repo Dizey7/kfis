@@ -137,3 +137,57 @@ test('descriptions de récurrences nettoyées', () => {
   assert.equal(N.parseText('Chaque 1er du mois, on paie un loyer 1174 $', ctx)[0].rule.description, 'Loyer');
   assert.equal(P('Netflix 18,99 $ par mois le 22').rule.description, 'Netflix');
 });
+
+/* ---- Reçus ---- */
+const R1 = `IGA EXTRA
+Marché Lambert
+1234 boul. Saint-Laurent, Montréal QC
+Tél. 514-555-0199
+2026/11/04 18:42
+LAIT 2% 4L          6,49
+PAIN               3,99
+POULET           14,87
+FROMAGE           8,99 FP
+SOUS-TOTAL        34,34
+TPS 5%             0,45
+TVQ 9,975%         0,90
+TOTAL             35,69
+VISA ************1234   35,69
+MERCI DE VOTRE VISITE`;
+test('reçu d’épicerie : total, taxes, date, commerçant, catégorie', () => {
+  const r = N.parseReceipt(R1, ctx);
+  assert.equal(r.totalCents, 3569); assert.equal(r.subtotalCents, 3434);
+  assert.equal(r.tpsCents, 45); assert.equal(r.tvqCents, 90);
+  assert.equal(r.date, '2026-11-04'); assert.equal(r.merchant, 'IGA');
+  assert.equal(r.categoryId, 'epicerie'); assert.equal(r.method, 'Carte de crédit');
+});
+const R2 = `Chez Ma Tante
+Restaurant
+6/11/2026
+2 Poutine   25.00
+Biere       8.50
+Sous-total 33.50
+GST 1.68
+QST 3.34
+Total 38.52
+Pourboire 6.00
+INTERAC`;
+test('reçu de resto : point décimal, jj/mm/aaaa, débit', () => {
+  const r = N.parseReceipt(R2, ctx);
+  assert.equal(r.totalCents, 3852); assert.equal(r.date, '2026-11-06');
+  assert.equal(r.categoryId, 'restaurants'); assert.equal(r.method, 'Débit'); assert.equal(r.merchant, 'Chez Ma Tante');
+});
+test('reçu sans mot TOTAL : montant le plus élevé + avertissement', () => {
+  const r = N.parseReceipt('Petro-Canada\n55,23\n2026-11-05', ctx);
+  assert.equal(r.totalCents, 5523); assert.equal(r.categoryId, 'essence');
+  assert.ok(r.warnings.some(w => /deviné/.test(w)));
+});
+test('date future ou absurde rejetée', () => {
+  const r = N.parseReceipt('Tim Hortons\nTOTAL 4,25\n2031-01-01', ctx);
+  assert.equal(r.date, '2026-11-06'); assert.equal(r.categoryId, 'cafe');
+});
+
+test('reçu lu avec des confusions (e,22 / Ssous-TOTAL)', () => {
+  const r = N.parseReceipt('METRO PLUS\n2026-11-05 17:32 CAISSE 4\nBANANES 2,15\nSsous-TOTAL 33,50\nTPS 5% e,22\nTVQ 9,975% 0,45\nTOTAL 34,17\nMASTERCARD ****4821', ctx);
+  assert.equal(r.tpsCents, 22); assert.equal(r.tvqCents, 45); assert.equal(r.totalCents, 3417); assert.equal(r.merchant, 'Metro'); assert.deepEqual(r.warnings, []);
+});

@@ -64,6 +64,7 @@ const IC = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>', trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   check: '<path d="m5 12 5 5L20 7"/>', download: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>', upload: '<path d="M12 15V3M7 8l5-5 5 5M4 21h16"/>',
+  camera: '<path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h2l1.5-2h6l1.5 2h2A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><circle cx="12" cy="13" r="3.6"/>',
   spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
   alert: '<path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17v.5"/>', chev: '<path d="m9 6 6 6-6 6"/>', chevl: '<path d="m15 6-6 6 6 6"/>',
   repeat: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/>',
@@ -348,7 +349,9 @@ function nlpCtx() { return { today: today(), me: S.me, cats: C(), sources: S.sou
 function smartBar() {
   return `<div class="card smart"><form id="smart-form" autocomplete="off"><div class="smart-row"><div class="ico sv smart-ico">${ico('spark')}</div>
     <textarea id="smart-in" class="smart-in" rows="1" enterkeyhint="done" placeholder="Écrivez ce qui s’est passé : « 45 $ resto avec Yousra hier »" aria-label="Écrire une transaction">${esc(UI.smart)}</textarea>
+    <label class="btn smart-cam" for="receipt-file" title="Photographier un reçu" aria-label="Photographier un reçu">${ico('camera')}<span>Reçu</span></label>
     <button type="submit" class="btn pri" id="smart-go" disabled>Ajouter</button></div></form>
+    <input type="file" id="receipt-file" accept="image/*" capture="environment" hidden>
     <div id="smart-prev">${smartPreview()}</div></div>`;
 }
 function dupOf(tx) {
@@ -448,6 +451,77 @@ function smartEdit(i) {
   if (r.kind === 'rule') return openRecurring(null, r.rule);
   openTx({ type: r.tx.type, date: r.tx.date, preset: Object.assign({}, r.tx) });
 }
+
+/* =========================== Photo de reçu =========================== */
+let ocrWorker = null, sampleImages = false;
+async function prepImage(file, maxSide, gray) {
+  const bmp = await createImageBitmap(file).catch(() => null);
+  let img = bmp;
+  if (!img) { img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
+  const w = img.width, h = img.height, k = Math.min(1, maxSide / Math.max(w, h));
+  const c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
+  const g = c.getContext('2d'); g.drawImage(img, 0, 0, c.width, c.height);
+  if (gray) {
+    const d = g.getImageData(0, 0, c.width, c.height), a = d.data;
+    for (let i = 0; i < a.length; i += 4) { let v = 0.299 * a[i] + 0.587 * a[i + 1] + 0.114 * a[i + 2]; v = Math.max(0, Math.min(255, (v - 128) * 1.5 + 140)); a[i] = a[i + 1] = a[i + 2] = v; }
+    g.putImageData(d, 0, 0);
+  }
+  return c;
+}
+const canvasBlob = (c, type, q) => new Promise(r => c.toBlob(r, type, q));
+async function ocrLocal(file, onProgress) {
+  if (!window.Tesseract) await loadScript('ocr/tesseract.min.js', 'Tesseract');
+  if (!ocrWorker) {
+    onProgress('Préparation de la lecture (une seule fois)…');
+    ocrWorker = await window.Tesseract.createWorker('fra', 1, { workerPath: 'ocr/worker.min.js', corePath: 'ocr/', langPath: 'ocr', gzip: true, logger: m => { if (m.status === 'recognizing text') onProgress('Lecture du reçu… ' + Math.round(m.progress * 100) + ' %'); } });
+    await ocrWorker.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' });
+  }
+  const c = await prepImage(file, 2000, true);
+  onProgress('Lecture du reçu…');
+  const { data } = await ocrWorker.recognize(c);
+  return NLP.parseReceipt(data.text, nlpCtx());
+}
+async function ocrClaude(file, onProgress) {
+  onProgress('Claude lit le reçu…');
+  const c = await prepImage(file, 1600, false);
+  const blob = await canvasBlob(c, 'image/jpeg', 0.85);
+  const catList = Object.values(C()).filter(x => x.kind === 'expense').map(x => x.id + ' = ' + x.name).join('; ');
+  const j = await sampleFn.json(`Voici la photo d'un reçu d'achat (Québec). Lis-le attentivement et réponds UNIQUEMENT avec un objet JSON :
+{"merchant": "nom du commerce", "total": "montant total payé, ex. 35.69", "subtotal": "ou null", "tps": "TPS/GST ou null", "tvq": "TVQ/QST ou null", "date": "AAAA-MM-JJ ou null", "method": "Carte de crédit | Débit | Comptant | null", "categoryId": "un identifiant de la liste", "unsure": ["ce qui est illisible ou incertain"]}
+N'invente rien : mets null si une valeur n'est pas lisible. Le total est le montant final payé (taxes incluses, pourboire inclus s'il est ajouté au total). Aujourd'hui : ${today()}.
+Catégories (identifiant = nom) : ${catList}`, { images: [blob], modelTier: 'default', cache: false });
+  const money = v => v === null || v === undefined || v === '' ? null : K.parseMoney(String(v).replace('.', ','));
+  const r = { merchant: j.merchant || null, totalCents: money(j.total), subtotalCents: money(j.subtotal), tpsCents: money(j.tps), tvqCents: money(j.tvq), date: K.isISODate(j.date) && j.date <= today() ? j.date : today(), method: ['Carte de crédit', 'Débit', 'Comptant'].includes(j.method) ? j.method : '', categoryId: C()[j.categoryId] ? j.categoryId : NLP.matchCategory(NLP.norm(j.merchant || ''), j.merchant || '', C()).id, warnings: [] };
+  if (!K.isISODate(j.date)) r.warnings.push('Date du reçu non trouvée : aujourd’hui');
+  if (!r.totalCents) r.warnings.push('Total non trouvé');
+  (Array.isArray(j.unsure) ? j.unsure : []).slice(0, 3).forEach(u => r.warnings.push('À vérifier : ' + String(u)));
+  return r;
+}
+async function handleReceipt(file) {
+  if (!file) return;
+  if (!/^image\//.test(file.type) && !/\.(heic|heif|jpe?g|png|webp)$/i.test(file.name || '')) return toast('Choisissez une photo du reçu.');
+  const useClaude = !!(sampleFn && sampleImages), useLocal = !!window.KFIS_STANDALONE;
+  if (!useClaude && !useLocal) return toast('La lecture des reçus n’est pas disponible ici. Autorisez l’assistant Claude, ou utilisez le lien direct.');
+  openModal('Lecture du reçu', `<div class="receipt-wait"><div class="spinner"></div><div id="ocr-msg">Ouverture de la photo…</div><div class="small muted">${useClaude ? 'La photo est envoyée à Claude pour lecture.' : 'La lecture se fait sur cet appareil : la photo n’est envoyée nulle part.'}</div></div>`, `<span class="grow"></span><button type="button" class="btn ghost" data-act="modal-close">Annuler</button>`, () => {});
+  const ctl = modalCtx; const msg = t => { const e = $('#ocr-msg'); if (e) e.textContent = t; };
+  let thumb = null;
+  try { const tc = await prepImage(file, 360, false); thumb = tc.toDataURL('image/jpeg', 0.7); } catch (e) { /* aperçu facultatif */ }
+  let r;
+  try { r = useClaude ? await ocrClaude(file, msg) : await ocrLocal(file, msg); }
+  catch (e) {
+    if (modalCtx !== ctl) return;
+    const code = e && e.code;
+    if (code === 'not_granted' || code === 'images_unavailable' || code === 'sampling_disabled') sampleImages = false;
+    msg(code === 'not_granted' ? 'Lecture refusée : autorisez Claude pour lire les reçus.' : code === 'invalid_json' ? 'Le reçu n’a pas pu être lu. Essayez une photo plus nette, à plat et bien éclairée.' : 'Lecture impossible. Essayez une photo plus nette, à plat et bien éclairée.');
+    return;
+  }
+  if (modalCtx !== ctl) return; // annulé
+  closeModal();
+  const notes = ['Reçu' + (r.merchant ? ' ' + r.merchant : ''), r.subtotalCents ? 'sous-total ' + K.formatMoney(r.subtotalCents) : '', r.tpsCents !== null && r.tpsCents !== undefined ? 'TPS ' + K.formatMoney(r.tpsCents) : '', r.tvqCents !== null && r.tvqCents !== undefined ? 'TVQ ' + K.formatMoney(r.tvqCents) : ''].filter(Boolean).join(' · ');
+  const shared = ['epicerie', 'loyer', 'hydro', 'internet', 'chauffage', 'menage'].includes(r.categoryId);
+  openTx({ type: 'expense', date: r.date, receipt: { r, thumb, engine: useClaude ? 'claude' : 'local' }, preset: { amountCents: r.totalCents || undefined, categoryId: r.categoryId, description: r.merchant || 'Reçu', method: r.method || '', notes, shared, source: 'recu' } });
+}
+document.addEventListener('change', e => { if (e.target.id === 'receipt-file' && e.target.files[0]) { const f = e.target.files[0]; e.target.value = ''; handleReceipt(f); } });
 
 /* ================================ VUES ================================ */
 const VIEWS = {};
@@ -964,7 +1038,10 @@ function openTx(opts) {
   const mainType = isRefund ? 'expense' : tx.type;
   const types = [['expense', 'Dépense'], ['income', 'Revenu'], ['savings', 'Épargne'], ['transfer', 'Transfert']];
   const p = (K.payPeriodFor(tx.date, anchor() || tx.date));
-  const body = `${!ex ? `<div class="field"><label for="tx-nl" style="display:flex;gap:6px;align-items:center">${ico('spark')}Écrire en une phrase</label><input class="inp" id="tx-nl" placeholder="Ex. : 45 $ resto avec Yousra hier" autocomplete="off" enterkeyhint="next"><div class="hint">Le formulaire se remplit tout seul. Vérifiez puis Enregistrer.</div></div>` : ''}
+  const rc = opts.receipt;
+  const body = `${rc ? `<div class="receipt-box">${rc.thumb ? `<img src="${rc.thumb}" alt="Reçu photographié">` : ''}<div class="grow"><div style="font-weight:600;display:flex;gap:6px;align-items:center">${ico('camera')}Reçu lu ${rc.engine === 'claude' ? 'par Claude' : 'sur l’appareil'}</div>
+      <div class="small muted" style="margin-top:4px">${[rc.r.merchant, rc.r.subtotalCents ? 'Sous-total ' + M(rc.r.subtotalCents) : '', rc.r.tpsCents !== null && rc.r.tpsCents !== undefined ? 'TPS ' + M(rc.r.tpsCents) : '', rc.r.tvqCents !== null && rc.r.tvqCents !== undefined ? 'TVQ ' + M(rc.r.tvqCents) : ''].filter(Boolean).map(esc).join(' · ')}</div>
+      ${rc.r.warnings.length ? `<div class="chips" style="margin-top:6px">${rc.r.warnings.map(w => `<span class="pill near">${esc(w)}</span>`).join('')}</div>` : '<div class="chips" style="margin-top:6px"><span class="pill ok">Tout a été trouvé · vérifiez et enregistrez</span></div>'}</div></div>` : ''}${!ex && !rc ? `<div class="field"><label for="tx-nl" style="display:flex;gap:6px;align-items:center">${ico('spark')}Écrire en une phrase</label><input class="inp" id="tx-nl" placeholder="Ex. : 45 $ resto avec Yousra hier" autocomplete="off" enterkeyhint="next"><div class="hint">Le formulaire se remplit tout seul. Vérifiez puis Enregistrer.</div></div>` : ''}
     <div class="seg" id="tx-types" style="width:100%">${types.map(([k, l]) => `<button type="button" class="${mainType === k ? 'on' : ''}" style="flex:1" data-act="tx-type" data-v="${k}">${l}</button>`).join('')}</div>
     <div class="field"><label for="tx-amt">Montant ($ CAD)</label><input class="amount-inp" id="tx-amt" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(centsStr(tx.amountCents))}" autofocus><div class="err" id="err-amount"></div>
       <div class="hint" id="tax-hint" ${mainType === 'expense' ? '' : 'hidden'}><label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="tx-addtax" data-act="tax-toggle">Montant avant taxes : ajouter TPS + TVQ</label> <span id="tax-out"></span></div></div>
@@ -981,7 +1058,8 @@ function openTx(opts) {
     <div class="banner" id="dup-warn" hidden></div>`;
   let extra = '';
   if (ex) extra = `${deleteBtn('tx-delete', ex.id)}<button type="button" class="btn" data-act="tx-cancel" data-id="${esc(ex.id)}">${ex.status === 'cancelled' ? 'Rétablir' : 'Annuler la transaction'}</button>`;
-  openModal(ex ? 'Modifier la transaction' : 'Ajouter une transaction', body, footStd(extra), saveTx, { tx, existing: !!ex, refund: isRefund, dupOk: false });
+  openModal(ex ? 'Modifier la transaction' : rc ? 'Dépense depuis un reçu' : 'Ajouter une transaction', body, footStd(extra), saveTx, { tx, existing: !!ex, refund: isRefund, dupOk: false });
+  if (rc) { const b = $('#m-save'); if (b) b.textContent = 'Enregistrer la dépense'; }
 }
 function txFields(tx) {
   const t = tx.type === 'refund' ? 'expense' : tx.type;
@@ -1514,6 +1592,7 @@ async function boot() {
   if (!cl || !cl.use) return memoryMode();
   const [dbx, u, smp, dl] = await Promise.all([cl.use('db'), cl.use('user'), cl.use('sample'), cl.use('downloads')].map(p => p.catch(() => null)));
   db = dbx; userCap = u; sampleFn = smp; downloads = dl;
+  if (sampleFn && sampleFn.limits) { try { const lim = await sampleFn.limits(); sampleImages = !!(lim && lim.images); } catch (e) { sampleImages = false; } }
   if (!db) return memoryMode();
   if (userCap) {
     try { S.isOwner = !!(await userCap.isOwner()); const w = userCap.can ? await userCap.can('data.write') : null; S.canWrite = S.isOwner || w !== false; } catch (e) { /* inconnu : on garde l'écriture */ }
